@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR PDF Renamer</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-5">
+        <h1>OCR PDF Renamer</h1>
+        <p>Upload a PDF, select regions, and rename based on extracted text.</p>
+        <form id="uploadForm" enctype="multipart/form-data" method="post" action="/upload">
+            <div class="mb-3">
+                <label for="pdfFile" class="form-label">Select PDF file</label>
+                <input class="form-control" type="file" id="pdfFile" name="file" accept="application/pdf" required>
+            </div>
+            <button type="submit" class="btn btn-primary">Upload</button>
+        </form>
+        <div id="uploadResult" class="mt-3"></div>
+        <div id="regionSelection" class="mt-4" style="display:none;">
+            <h4>Select Regions for OCR</h4>
+            <p>Draw rectangles on the image and name each region. Double-click to finish a region.</p>
+            <div style="position:relative; display:inline-block;">
+                <canvas id="pdfCanvas" style="border:1px solid #888; cursor:crosshair;"></canvas>
+                <div id="regionLabels" style="position:absolute; top:0; left:0;"></div>
+            </div>
+            <form id="regionsForm" class="mt-3">
+                <div id="regionsList"></div>
+                <div class="mb-3">
+                    <label for="renamePattern" class="form-label">Rename Pattern (use {region_name} as placeholders)</label>
+                    <input type="text" class="form-control" id="renamePattern" name="rename_pattern" placeholder="e.g. DOC_{region1}_{region2}">
+                </div>
+                <button type="submit" class="btn btn-success">Process & Rename</button>
+            </form>
+            <button id="batchProcessBtn" class="btn btn-warning mt-2" style="display:none;">Batch Process Folder</button>
+            <div id="batchResult" class="mt-3"></div>
+            <div id="processResult" class="mt-3"></div>
+        </div>
+    <script>
+    let previewImageData = null;
+    let imageWidth = 0;
+    let imageHeight = 0;
+    let regions = [];
+    let drawing = false;
+    let startX, startY;
+    let canvas, ctx;
+
+    document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const form = e.target;
+        const formData = new FormData(form);
+        const resultDiv = document.getElementById('uploadResult');
+        resultDiv.innerHTML = 'Uploading...';
+        try {
+            const response = await fetch('/upload', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await response.json();
+            if (data.success) {
+                previewImageData = data.preview_image;
+                imageWidth = data.image_width;
+                imageHeight = data.image_height;
+                resultDiv.innerHTML = `<div class='alert alert-success'>Upload successful! Preview below:</div>`;
+                showCanvas(previewImageData, imageWidth, imageHeight);
+                document.getElementById('regionSelection').style.display = '';
+            } else {
+                resultDiv.innerHTML = `<div class='alert alert-danger'>${data.error}</div>`;
+                document.getElementById('regionSelection').style.display = 'none';
+            }
+        } catch (err) {
+            resultDiv.innerHTML = `<div class='alert alert-danger'>Error uploading file.</div>`;
+            document.getElementById('regionSelection').style.display = 'none';
+        }
+    });
+
+    function showCanvas(imgData, width, height) {
+        canvas = document.getElementById('pdfCanvas');
+        ctx = canvas.getContext('2d');
+        canvas.width = width;
+        canvas.height = height;
+        const img = new window.Image();
+        img.onload = function() {
+            ctx.clearRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+            drawRegions();
+        };
+        img.src = imgData;
+    }
+
+    function drawRegions() {
+        if (!ctx) return;
+        ctx.drawImage(document.createElement('img'), 0, 0, imageWidth, imageHeight); // clear
+        const img = new window.Image();
+        img.onload = function() {
+            ctx.clearRect(0, 0, imageWidth, imageHeight);
+            ctx.drawImage(img, 0, 0, imageWidth, imageHeight);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#ff0000';
+            regions.forEach((r, i) => {
+                ctx.strokeRect(r.x, r.y, r.width, r.height);
+            });
+        };
+        img.src = previewImageData;
+    }
+
+    document.getElementById('pdfCanvas').addEventListener('mousedown', function(e) {
+        if (!previewImageData) return;
+        drawing = true;
+        const rect = canvas.getBoundingClientRect();
+        startX = e.clientX - rect.left;
+        startY = e.clientY - rect.top;
+    });
+    document.getElementById('pdfCanvas').addEventListener('mousemove', function(e) {
+        if (!drawing) return;
+        const rect = canvas.getBoundingClientRect();
+        const currX = e.clientX - rect.left;
+        const currY = e.clientY - rect.top;
+        drawRegions();
+        ctx.setLineDash([6]);
+        ctx.strokeStyle = '#00f';
+        ctx.strokeRect(startX, startY, currX - startX, currY - startY);
+        ctx.setLineDash([]);
+    });
+    document.getElementById('pdfCanvas').addEventListener('mouseup', function(e) {
+        if (!drawing) return;
+        drawing = false;
+        const rect = canvas.getBoundingClientRect();
+        const endX = e.clientX - rect.left;
+        const endY = e.clientY - rect.top;
+        const x = Math.min(startX, endX);
+        const y = Math.min(startY, endY);
+        const width = Math.abs(endX - startX);
+        const height = Math.abs(endY - startY);
+        if (width > 10 && height > 10) {
+            const regionName = prompt('Enter a name for this region:');
+            if (regionName) {
+                regions.push({ name: regionName, x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
+                updateRegionsList();
+                drawRegions();
+            }
+        }
+    });
+
+    function updateRegionsList() {
+        const listDiv = document.getElementById('regionsList');
+        listDiv.innerHTML = '';
+        regions.forEach((r, i) => {
+            listDiv.innerHTML += `<div class='mb-2'><b>${r.name}</b>: x=${r.x}, y=${r.y}, w=${r.width}, h=${r.height} <button type='button' class='btn btn-sm btn-danger' onclick='removeRegion(${i})'>Remove</button></div>`;
+        });
+    }
+    window.removeRegion = function(idx) {
+        regions.splice(idx, 1);
+        updateRegionsList();
+        drawRegions();
+    };
+
+    function showBatchButton() {
+        document.getElementById('batchProcessBtn').style.display = '';
+    }
+    document.getElementById('regionsForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const renamePattern = document.getElementById('renamePattern').value;
+        const filename = document.getElementById('pdfFile').files[0]?.name;
+        if (!regions.length) {
+            document.getElementById('processResult').innerHTML = '<div class="alert alert-warning">Please select at least one region.</div>';
+            return;
+        }
+        if (!renamePattern) {
+            document.getElementById('processResult').innerHTML = '<div class="alert alert-warning">Please enter a rename pattern.</div>';
+            return;
+        }
+        document.getElementById('processResult').innerHTML = 'Processing...';
+        try {
+            const response = await fetch('/process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filename: filename,
+                    regions: Object.fromEntries(regions.map(r => [r.name, [r.x, r.y, r.width, r.height]])),
+                    rename_pattern: renamePattern
+                })
+            });
+            const data = await response.json();
+            if (data.success) {
+                document.getElementById('processResult').innerHTML = `<div class='alert alert-success'>File renamed to: <b>${data.new_filename}</b></div>`;
+                showBatchButton();
+            } else {
+                document.getElementById('processResult').innerHTML = `<div class='alert alert-danger'>${data.error || data.rename_error}</div>`;
+            }
+        } catch (err) {
+            document.getElementById('processResult').innerHTML = '<div class="alert alert-danger">Error processing file.</div>';
+        }
+    });
+    document.getElementById('batchProcessBtn').addEventListener('click', async function() {
+        if (!regions.length || !document.getElementById('renamePattern').value) return;
+        document.getElementById('batchResult').innerHTML = 'Batch processing...';
+        try {
+            const response = await fetch('/process_folder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    regions: Object.fromEntries(regions.map(r => [r.name, [r.x, r.y, r.width, r.height]])),
+                    rename_pattern: document.getElementById('renamePattern').value
+                })
+            });
+            const data = await response.json();
+            if (data.results) {
+                let html = `<div class='alert alert-info'>Batch Results:</div><ul class='list-group'>`;
+                data.results.forEach(r => {
+                    if (r.success && r.file_renamed) {
+                        html += `<li class='list-group-item list-group-item-success'>${r.original_filename} → ${r.new_filename}</li>`;
+                    } else {
+                        html += `<li class='list-group-item list-group-item-danger'>${r.original_filename}: ${r.error || r.rename_error || 'Failed'}</li>`;
+                    }
+                });
+                html += '</ul>';
+                document.getElementById('batchResult').innerHTML = html;
+            } else {
+                document.getElementById('batchResult').innerHTML = `<div class='alert alert-danger'>${data.error || 'Batch processing failed.'}</div>`;
+            }
+        } catch (err) {
+            document.getElementById('batchResult').innerHTML = `<div class='alert alert-danger'>Error during batch processing.</div>`;
+        }
+    });
+    </script>
+</body>
+</html> 
